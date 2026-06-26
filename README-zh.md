@@ -1,7 +1,7 @@
 <p align="center"><a href="./README.md">English</a> | <a href="./README-zh.md">中文</a></p>
 
 <p align="center">
-  <h1 align="center">📊 epic-leek-quant</h1>
+  <h1 align="center">🌱 epic-leek-quant</h1>
   <p align="center">
     <em>把深度价值"捡烟蒂"投资理念量化落地 A 股市场</em>
   </p>
