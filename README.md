@@ -3,7 +3,8 @@
 <p align="center">
   <h1 align="center">🌱 epic-leek-quant</h1>
   <p align="center">
-    <em>Quantifying deep-value "cigar-butt" investing for the A-share market</em>
+    <em>Quantifying deep-value "cigar-butt" investing for the A-share market</em><br>
+    <sub>"Epic Leek" — literal translation of 史诗级韭菜 (shǐshī-jí jiǔcài), a Bilibili finance creator whose name plays on the Chinese stock-market slang "leek" (韭菜) for retail investors who keep coming back</sub>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License">

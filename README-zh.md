@@ -3,7 +3,8 @@
 <p align="center">
   <h1 align="center">🌱 epic-leek-quant</h1>
   <p align="center">
-    <em>把深度价值"捡烟蒂"投资理念量化落地 A 股市场</em>
+    <em>把深度价值"捡烟蒂"投资理念量化落地 A 股市场</em><br>
+    <sub>epic-leek = "史诗级韭菜"的英译——"韭菜"在 A 股语境里指被反复收割却不断入场的散户</sub>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="许可证">
