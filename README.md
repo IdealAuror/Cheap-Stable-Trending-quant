@@ -1,7 +1,7 @@
 <p align="center"><a href="./README.md">English</a> | <a href="./README-zh.md">中文</a></p>
 
 <p align="center">
-  <h1 align="center">🥬 epic-leek-quant</h1>
+  <h1 align="center">📊 epic-leek-quant</h1>
   <p align="center">
     <em>Quantifying deep-value "cigar-butt" investing for the A-share market</em>
   </p>
