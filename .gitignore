@@ -1,0 +1,83 @@
+# ==================== Python ====================
+# WorkBuddy agent workspace (NOT temporary cache — do not commit)
+.workbuddy/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ==================== 虚拟环境 ====================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==================== IDE / 编辑器 ====================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==================== Jupyter ====================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==================== 项目：回测结果大文件 ====================
+# results/ 下的净值 CSV、IC 表、日志等大文件不入库
+# 仅保留目录结构与 README
+results/*.csv
+results/*.parquet
+results/*.feather
+results/*.h5
+results/*.log
+results/*.json
+results/**/*.csv
+results/**/*.parquet
+results/**/*.log
+results/**/*.json
+
+# 但保留 results 下的 README / 索引类小文件
+!results/README.md
+!results/**/README.md
+
+# ==================== 项目：聚宽本地缓存与密钥 ====================
+.joinquant/
+jq_cache/
+*.jqkey
+secrets.json
+config.local.json
+.env
+.env.local
+
+# ==================== 项目：研究记录中的临时草稿 ====================
+# 命名形如 *_draft.md / *_scratch.* 的草稿不入库
+research/**/*_draft.md
+research/**/*_scratch.*
+research/**/.tmp/
+
+# ==================== Git ====================
+*.orig
+*.rej
