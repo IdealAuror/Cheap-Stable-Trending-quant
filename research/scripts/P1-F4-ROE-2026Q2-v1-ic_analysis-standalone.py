@@ -1,21 +1,25 @@
 """
-P1-F1-EV-2026Q2-v1 IC 分析脚本（standalone 版）
+P1-F4-ROE-2026Q2-v1 IC 分析脚本（Phase 1.3 standalone 版）
 =================================================
 
-在聚宽【研究环境】中直接粘贴运行，无需上传 data_layer.py / factor_lib.py。
-所有依赖逻辑已内联。
+Phase 1.3：F4 质量（ROE）因子 IC 验证。
 
-产出 spec 要求的表1-7 + CSV 序列，用于 Gate 1 七条判定。
+F3 股息率因聚宽无现成字段（需遍历 STK_XR_XD 聚合，太慢）跳过。
+F4 ROE 数据现成（STK_FINANCIAL_INDICATOR.roe_this_year），且：
+- A 股最稳定的质量因子（theory-framework：t=3.41***）
+- 与 F2-EP 低相关（EP 选便宜的，ROE 选好的，选股池不同）
+- 核心价值是下行保护（theory-framework §3.4），正好补 F2-EP 回撤大的短板
 
-【符号约定】（重要，避免 IC 方向混淆）
-- 原始 ev = market_cap + 有息负债 - cash，越低（越负）= 净现金越多 = "好"信号
-- 定义 signal = -ev（越高 = 净现金越多 = 越好），使 IC>0 表示因子有效（Gate 1 规则1）
-- Q1-Q5 按 ev 升序分位：Q1 = 最低 ev（净现金最多）= 多头组（Gate 1 规则2 "Q1多头组"）
-- 同时报告二值 factor_ev_negative 的 IC（spec 定义因子），作为辅助校验
+数据来源：finance.STK_FINANCIAL_INDICATOR 表
+- roe_this_year：当期 ROE
+- roe_weighted_this_year：加权 ROE（更稳健，用这个作主信号）
 
-【spec 歧义处理记录】
-- factor_ev_negative 为二值因子，无法做 Q1-Q5 五分组 → 改用连续 ev 排序分组，
-  Q1=最低ev(净现金最多)=多头组；二值 IC 单独报告。
+验证门槛（不变）：市值中性化后 IC NW-t ≥ 2
+
+【符号约定】
+- signal = roe_weighted（越高=越好，IC>0 有效）
+- 对照：roe_spot = net_profit / equity（手算当期 ROE，验证官方字段一致性）
+- Q1-Q5 按 ROE 升序：Q5 = 最高 ROE = 多头组
 """
 
 import datetime
@@ -27,16 +31,8 @@ import pandas as pd
 from scipy import stats
 from statsmodels.stats.sandwich_covariance import cov_hac
 
-# ============================================================
-# 聚宽对象解析（兼容研究环境多种注入方式）
-# ============================================================
-# 聚宽研究环境会把 valuation/balance/income/cash_flow/query/get_fundamentals 等
-# 注入到全局命名空间。但不同 kernel 配置下注入位置可能不同（globals 或 builtins）。
-# 这里用多层 fallback 解析，避免 globals()[name] 字典查找绕过 builtins 的问题。
-
 from jqdata import *  # noqa: F403,F401
 
-# 显式导入兜底（若 jqdata __all__ 未导出，依赖 kernel 预加载/builtins）
 try:
     from jqdata import (  # noqa: F401
         valuation, balance, income, cash_flow, query,
@@ -45,7 +41,7 @@ try:
         get_trade_days, get_industry, finance,
     )
 except Exception:
-    pass  # 依赖 kernel 预加载或 builtins 注入，后续直接按名字引用
+    pass
 
 
 warnings.filterwarnings('ignore')
@@ -57,19 +53,24 @@ warnings.filterwarnings('ignore')
 START_DATE = '2014-01-01'
 END_DATE = '2026-06-30'
 INDEX_IDS = {
-    'CSI300': '000300.XSHG',
-    'CSI500': '000905.XSHG',
-    # 'AllA': None,  # 全A股票多、资源消耗大，单独跑
+    'AllA': None,
 }
 
-# 快速验证开关：True=只跑2014年3个调仓日+只CSI300，验证数据链；
-# 验证通过后改 False 跑全量
 QUICK_TEST = False
-FACTOR_BINARY = 'factor_ev_negative'
-SHELL_THRESHOLD_PRE = 20e8      # 注册制前 20 亿
-SHELL_THRESHOLD_POST = 30e8     # 注册制后 30 亿
+RUN_V2 = False
+SHELL_THRESHOLD_PRE = 20e8
+SHELL_THRESHOLD_POST = 30e8
 BREAKPOINT = datetime.date(2019, 6, 1)
-OUT_DIR = 'results/P1-F1-EV-2026Q2-v1'
+OUT_DIR = 'results/P1-F4-ROE-2026Q2-v1'
+
+# 金融股剔除
+EXCLUDE_INDUSTRIES = {'银行I', '非银金融I'}
+
+# Phase 1.1：金融股剔除（申万一级 / jq_l1 一级行业名）
+# 证券/保险/多元金融在一级分类里统称"非银金融"，不可拆分
+EXCLUDE_INDUSTRIES = {'银行', '非银金融'}
+
+
 
 
 # ============================================================
@@ -77,7 +78,7 @@ OUT_DIR = 'results/P1-F1-EV-2026Q2-v1'
 # ============================================================
 
 def _get_stock_pool(index_id, date_str, min_listed_days=180):
-    """构建股票池：成分股（或全A）→ 剔ST → 剔次新股。"""
+    """构建股票池：成分股（或全A）→ 剔ST → 剔次新股 → 剔金融股（Phase 1.1）。"""
     if index_id is None:
         sec_df = get_all_securities(['stock'], date=date_str)
         stocks = list(sec_df.index)
@@ -105,7 +106,52 @@ def _get_stock_pool(index_id, date_str, min_listed_days=180):
         start = pd.Timestamp(info.start_date)
         if (cur - start).days >= min_listed_days:
             result.append(s)
-    return result
+    stocks = result
+
+    # Phase 1.1：金融股剔除（银行/证券/保险/非银金融/多元金融）
+    # cash/leverage/EV 类因子必须剔除金融股，否则经营性头寸制造离群值
+    # 直接调 get_industry 原始 API，遍历所有分类 scheme，关键词模糊匹配
+    if stocks:
+        before = len(stocks)
+        stocks = _exclude_finance_stocks(stocks, date_str, debug=True)
+        excluded = before - len(stocks)
+        print(f'    [debug] {date_str}: 金融股剔除 {excluded} 只，剩余 {len(stocks)} 只')
+    return stocks
+
+
+# 金融行业关键词（仅匹配 sw_l1 申万一级，严格相等避免类型陷阱）
+# 探测确认：sw_l1 金融股名为 "银行I" / "非银金融I"，非金融股为 "食品饮料I" 等
+# 注意：不可用 `in`（包含匹配），实测会误伤全样本；改用严格相等
+_FINANCE_NAMES = {'银行I', '非银金融I'}
+
+
+def _exclude_finance_stocks(stocks, date_str, debug=False):
+    """从 stocks 中剔除金融行业股票。仅用 sw_l1（申万一级）严格相等匹配。"""
+    if not stocks:
+        return stocks
+    try:
+        ind_raw = get_industry(stocks, date=date_str)
+    except Exception as e:
+        if debug:
+            print(f'    [debug] {date_str}: get_industry 调用失败({e})，金融股未剔除')
+        return stocks
+    if not ind_raw:
+        if debug:
+            print(f'    [debug] {date_str}: get_industry 返回空，金融股未剔除')
+        return stocks
+
+    finance_codes = set()
+    for code, schemes in ind_raw.items():
+        if not isinstance(schemes, dict):
+            continue
+        sw_l1 = schemes.get('sw_l1')
+        if not isinstance(sw_l1, dict):
+            continue
+        name = str(sw_l1.get('industry_name', '') or '')
+        if name in _FINANCE_NAMES:
+            finance_codes.add(code)
+    return [s for s in stocks if s not in finance_codes]
+
 
 
 def _fetch_fundamentals_pit(date_str, stocks):
@@ -180,6 +226,57 @@ def _fetch_fundamentals_pit(date_str, stocks):
     return df
 
 
+def _fetch_roe_history(date_str, stocks, lookback_years=3):
+    """查历史 ROE，用于稳态 EP 因子。
+
+    聚宽 get_fundamentals(date=d) 返回 d 当天最新可得财报。
+    为取 3 年稳态 ROE，往前取 3 个年度同日的财报，拼成历史序列。
+
+    ROE = net_profit / total_owner_equities（当期值，非 TTM）
+    用每期 ROE 取中位数作稳态 ROE。
+
+    返回 {code: [roe_t-2, roe_t-1, roe_t]}，缺失期为 np.nan。
+    """
+    if not stocks:
+        return {}
+    cur_date = pd.Timestamp(date_str)
+    history = {}  # {code: [roe1, roe2, roe3]}
+
+    for years_ago in range(lookback_years, 0, -1):
+        query_date = cur_date - pd.DateOffset(years=years_ago)
+        qd_str = query_date.strftime('%Y-%m-%d')
+        try:
+            # 查 balance 净资产 + income 净利润
+            df_bal = get_fundamentals(query(balance), date=qd_str)
+            df_inc = get_fundamentals(query(income), date=qd_str)
+            if df_bal is None or df_bal.empty or df_inc is None or df_inc.empty:
+                continue
+            # 净资产字段探测
+            equity = _get_col(df_bal.set_index('code') if 'code' in df_bal.columns else df_bal,
+                              'total_owner_equities', 'owner_equities',
+                              'total_equity', 'equities')
+            # 净利润字段探测
+            profit = _get_col(df_inc.set_index('code') if 'code' in df_inc.columns else df_inc,
+                              'net_profit', 'np_parent_company_owners',
+                              'net_profit_is_parent_company')
+            if equity is None or profit is None:
+                continue
+            roe = (profit.astype(float) / equity.astype(float).replace(0, np.nan))
+            for code in stocks:
+                if code in roe.index:
+                    history.setdefault(code, []).append(float(roe[code]))
+        except Exception:
+            continue
+
+    # 补齐缺失期
+    for code in stocks:
+        hist = history.get(code, [])
+        while len(hist) < lookback_years:
+            hist.insert(0, np.nan)
+        history[code] = hist[-lookback_years:]
+    return history
+
+
 def _fetch_actual_controller(stocks, date_str):
     """查询实际控制人 {code: actual_controller}。
 
@@ -213,77 +310,83 @@ def _get_col(df, *candidates):
     return None
 
 
-def _calculate_all_factors(df):
-    """因子计算（内联版，聚宽真实字段名 + 单位统一，2026-06 诊断确认）。
+def _fetch_roe_from_finance(stocks, date_str):
+    """从 finance.STK_FINANCIAL_INDICATOR 查 ROE。
 
-    诊断确认的聚宽真实字段名（与文档/猜测的差异）：
-    - balance: cash_equivalents, total_assets, total_liability,
-              total_current_assets, total_current_liability,
-              shortterm_loan（无下划线！）, longterm_loan（无下划线！）,
-              accounts_payable, salaries_payable, taxs_payable（拼写！）
-    - income: net_profit
-    - cash_flow: net_operate_cash_flow
-
-    【关键：单位统一】
-    - valuation.market_cap 单位是【亿元】（诊断：茅台 24608.9 亿）
-    - balance/cash_flow 字段单位是【元】（诊断：茅台 cash_equivalents 507 亿=5.07e10 元）
-    - EV 计算必须统一为元：market_cap × 1e8
-
-    有息负债口径：shortterm_loan + longterm_loan（聚宽真实字段，比估算更精确）
+    该表按报告期存储，取 date_str 当天最新可得报告期的 ROE。
+    返回 {code: roe_weighted}。
     """
-    # market_cap（valuation 查询，单位亿元）
+    if not stocks:
+        return {}
+    try:
+        # 转6位代码用于查询
+        codes_6 = [s[:6] for s in stocks]
+        q = query(
+            finance.STK_FINANCIAL_INDICATOR.code,
+            finance.STK_FINANCIAL_INDICATOR.roe_weighted_this_year,
+            finance.STK_FINANCIAL_INDICATOR.roe_this_year,
+            finance.STK_FINANCIAL_INDICATOR.pub_date,
+        ).filter(
+            finance.STK_FINANCIAL_INDICATOR.code.in_(codes_6),
+            finance.STK_FINANCIAL_INDICATOR.pub_date <= date_str,
+        ).order_by(
+            finance.STK_FINANCIAL_INDICATOR.pub_date.desc()
+        )
+        df = finance.run_query(q)
+        if df is None or df.empty:
+            return {}
+        # 每只股票取最新一条（已按 pub_date 降序）
+        df = df.drop_duplicates(subset='code', keep='first')
+        # 6位代码转回聚宽代码
+        code_map = {c[:6]: c for c in stocks}
+        df['jq_code'] = df['code'].map(code_map)
+        df = df.dropna(subset=['jq_code'])
+        # 用加权 ROE（更稳健）
+        result = {}
+        for _, row in df.iterrows():
+            roe_w = row.get('roe_weighted_this_year')
+            roe_s = row.get('roe_this_year')
+            roe = roe_w if roe_w is not None and not np.isnan(float(roe_w)) else roe_s
+            if roe is not None and not np.isnan(float(roe)):
+                result[row['jq_code']] = float(roe)
+        return result
+    except Exception as e:
+        if debug_print:
+            print(f'    [debug] _fetch_roe_from_finance 失败: {e}')
+        return {}
+
+
+def _calculate_all_factors(df, roe_map=None):
+    """F4 ROE 因子计算。
+
+    ROE 来源：finance.STK_FINANCIAL_INDICATOR.roe_weighted_this_year
+    对照：手算当期 ROE = net_profit / equity（验证官方字段一致性）
+    """
     mcap = _get_col(df, 'market_cap')
     if mcap is None:
-        return None  # 无市值数据，无法计算因子
+        return None
     df['market_cap'] = mcap.astype(float)
 
-    # 有息负债：聚宽真实字段 shortterm_loan + longterm_loan（诊断确认，无下划线）
-    stl = _get_col(df, 'shortterm_loan', 'short_term_loan', 'short_term_loans')
-    ltl = _get_col(df, 'longterm_loan', 'long_term_loan', 'long_term_loans')
-    if stl is not None and ltl is not None:
-        interest_bearing_debt = stl.fillna(0) + ltl.fillna(0)
-    elif stl is not None:
-        interest_bearing_debt = stl.fillna(0)
-    elif ltl is not None:
-        interest_bearing_debt = ltl.fillna(0)
+    # 从 finance 表查 ROE（外部传入）
+    if roe_map:
+        df['roe_weighted'] = df.index.map(lambda c: roe_map.get(c, np.nan))
     else:
-        # 回退：用 total_liability 整体代理（高估有息负债，保守）
-        tl = _get_col(df, 'total_liability', 'total_liabilities')
-        interest_bearing_debt = tl.fillna(0) if tl is not None else 0
-    df['interest_bearing_debt'] = interest_bearing_debt
+        df['roe_weighted'] = np.nan
 
-    # cash_equivalents（货币资金，单位元）
-    cash = _get_col(df, 'cash_equivalents', 'monetary_funds')
-    if cash is None:
-        return None  # 无现金数据，无法算 EV
-    df['cash_equivalents'] = cash.astype(float)
-
-    # EV = market_cap（亿元→元）+ 有息负债（元）- cash（元）
-    # 统一为元，避免单位不一致导致因子失真
-    df['ev'] = (df['market_cap'] * 1e8) + df['interest_bearing_debt'] - df['cash_equivalents']
-    df['factor_ev_negative'] = (df['ev'] < 0).astype(int)
-    df['cash_available_ext'] = df['cash_equivalents']
-    df['ev_ext'] = df['ev']
-
-    # current_ratio = 流动资产 / 流动负债（同单位，无碍）
-    tca = _get_col(df, 'total_current_assets')
-    tcl = _get_col(df, 'total_current_liability', 'total_current_liabilities')
-    if tca is not None and tcl is not None:
-        df['current_ratio'] = tca.astype(float) / tcl.astype(float).replace(0, np.nan)
-    else:
-        df['current_ratio'] = np.nan
-
-    # earnings_yield = net_profit（元）/ market_cap（亿元→元）
+    # 手算当期 ROE 作对照
     np_col = _get_col(df, 'net_profit', 'np_parent_company_owners',
                       'net_profit_is_parent_company')
-    if np_col is not None:
+    equity = _get_col(df, 'total_owner_equities', 'owner_equities',
+                      'total_equity', 'equities')
+    if np_col is not None and equity is not None:
         df['net_profit'] = np_col.astype(float)
-        df['earnings_yield'] = df['net_profit'] / (df['market_cap'] * 1e8)
+        df['equity'] = equity.astype(float)
+        df['roe_spot'] = df['net_profit'] / df['equity'].replace(0, np.nan)
     else:
         df['net_profit'] = np.nan
-        df['earnings_yield'] = np.nan
+        df['roe_spot'] = np.nan
 
-    # debt_to_assets = total_liability / total_assets（同单位，无碍）
+    # debt_to_assets（过滤条件用）
     tl = _get_col(df, 'total_liability', 'total_liabilities')
     ta = _get_col(df, 'total_assets')
     if tl is not None and ta is not None:
@@ -293,7 +396,18 @@ def _calculate_all_factors(df):
     else:
         df['debt_to_assets'] = np.nan
 
+    # current_ratio（过滤条件用）
+    tca = _get_col(df, 'total_current_assets')
+    tcl = _get_col(df, 'total_current_liability', 'total_current_liabilities')
+    if tca is not None and tcl is not None:
+        df['current_ratio'] = tca.astype(float) / tcl.astype(float).replace(0, np.nan)
+    else:
+        df['current_ratio'] = np.nan
+
     return df
+
+
+debug_print = False  # 全局调试开关，build_cross_section 里设
 
 
 # ============================================================
@@ -516,7 +630,8 @@ def forward_month_return(codes, date_str, debug=False):
 # 单截面处理
 # ============================================================
 
-def build_cross_section(date, index_id, apply_shell_filter=False, debug=False):
+def build_cross_section(date, index_id, apply_shell_filter=False, debug=False,
+                        use_ext=False):
     """构建单个调仓日的横截面 DataFrame。None 表示数据不足。"""
     date_str = date.strftime('%Y-%m-%d')
     stocks = _get_stock_pool(index_id, date_str)
@@ -538,52 +653,58 @@ def build_cross_section(date, index_id, apply_shell_filter=False, debug=False):
     ctrl_map = _fetch_actual_controller(list(df.index), date_str)
     if ctrl_map:
         df['actual_controller'] = df.index.map(ctrl_map)
-    df = _calculate_all_factors(df)
+    global debug_print
+    debug_print = debug
+    # 从 finance 表查 ROE
+    roe_map = _fetch_roe_from_finance(list(df.index), date_str)
+    if debug:
+        print(f'    [debug] {date_str}: ROE查询 取到 {len(roe_map)}/{len(df.index)} 只')
+    df = _calculate_all_factors(df, roe_map=roe_map)
     if df is None or df.empty:
         if debug:
             print(f'    [debug] {date_str}: _calculate_all_factors 返回空')
         return None
     if debug:
+        roe_w = df['roe_weighted'].notna().sum() if 'roe_weighted' in df.columns else 0
+        roe_s = df['roe_spot'].notna().sum() if 'roe_spot' in df.columns else 0
         print(f'    [debug] {date_str}: 因子计算后 {len(df)} 只, '
-              f'ev非空={df["ev"].notna().sum() if "ev" in df.columns else 0}')
+              f'roe_weighted非空={roe_w}, roe_spot非空={roe_s}')
 
-    # 基础过滤——对缺失字段宽容（缺失不全部过滤掉）
-    # net_profit 缺失时视为通过（不因 income 表查询失败而误杀）
+    # 基础过滤
     if 'net_profit' in df.columns and df['net_profit'].notna().any():
         mask = df['net_profit'].fillna(0) > 0
     else:
         mask = pd.Series(True, index=df.index)
-    # debt_to_assets 缺失时视为通过
     if 'debt_to_assets' in df.columns and df['debt_to_assets'].notna().any():
         mask &= df['debt_to_assets'].fillna(0.5) <= 1.0
-    # current_ratio 缺失时视为通过
     if 'current_ratio' in df.columns and df['current_ratio'].notna().any():
         mask &= df['current_ratio'].fillna(2.0) > 1.5
-    # 必须 ev 可计算
-    if 'ev' not in df.columns or df['ev'].isna().all():
+    # 必须有 ROE（用 roe_spot，finance 表查不到）
+    if 'roe_spot' not in df.columns or df['roe_spot'].isna().all():
         if debug:
-            print(f'    [debug] {date_str}: ev 列不存在或全空')
+            print(f'    [debug] {date_str}: roe_spot 列不存在或全空')
         return None
-    mask &= df['ev'].notna()
+    mask &= df['roe_spot'].notna()
     df = df[mask].copy()
     if df.empty:
         if debug:
-            print(f'    [debug] {date_str}: 过滤后为空 '
-                  f'(net_profit>0={mask.sum() if "net_profit" in df.columns else "N/A"})')
+            print(f'    [debug] {date_str}: 过滤后为空')
         return None
     if debug:
         print(f'    [debug] {date_str}: 过滤后 {len(df)} 只')
 
     # V2 壳价值剔除
-    # market_cap 单位是亿元，阈值也用亿元（20/30 亿，不是 20e8/30e8 元）
     if apply_shell_filter:
-        threshold_yi = (20.0 if date < BREAKPOINT else 30.0)  # 亿元
+        threshold_yi = (20.0 if date < BREAKPOINT else 30.0)
         df = df[df['market_cap'] >= threshold_yi]
         if df.empty:
             return None
 
-    # signal = -ev（高=净现金多=好）
-    df['signal'] = -df['ev']
+    # Phase 1.3：主信号直接用 roe_spot（手算 net_profit/equity）
+    # finance.run_query 查 roe_weighted 返回0条（code格式/数量限制问题），
+    # 但 roe_spot 全覆盖（2357/2357），数据足够
+    df['signal'] = df['roe_spot'] if 'roe_spot' in df.columns and df['roe_spot'].notna().any() else df.get('roe_weighted', pd.Series(np.nan, index=df.index))
+    df['signal_raw'] = df['roe_spot']
 
     # 行业
     ind_map = get_industry_map(list(df.index), date_str)
@@ -597,7 +718,8 @@ def build_cross_section(date, index_id, apply_shell_filter=False, debug=False):
             print(f'    [debug] {date_str}: forward_month_return 返回 None')
         return None
     df['fwd_return'] = df.index.map(fwd)
-    df = df.dropna(subset=['fwd_return', 'signal', 'ev'])
+    drop_cols = ['fwd_return', 'signal']
+    df = df.dropna(subset=drop_cols)
     if len(df) < 10:
         if debug:
             print(f'    [debug] {date_str}: dropna 后不足 10 只 ({len(df)})')
@@ -614,6 +736,7 @@ def build_cross_section(date, index_id, apply_shell_filter=False, debug=False):
 def analyze_sample(sample_name, index_id, variant='V1'):
     """对单样本计算完整 IC 表。"""
     shell_filter = (variant == 'V2')
+    use_ext = (variant == 'V2')  # V2 用扩展现金口径 ev_ext
     tag = f'{sample_name}-{variant}'
     print(f'\n{"=" * 60}\n===== {tag} =====\n{"=" * 60}')
 
@@ -622,35 +745,46 @@ def analyze_sample(sample_name, index_id, variant='V1'):
         rebal_dates = rebal_dates[:3]
         print(f'  [快速模式] 只跑前 3 个调仓日: {rebal_dates}')
     records = []
-    ic_list, ic_binary_list, dates_list = [], [], []
+    ic_list, ic_binary_list, ic_ev_list, dates_list = [], [], [], []
     q_rets = {q: [] for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']}
 
     for i, date in enumerate(rebal_dates):
         df = build_cross_section(date, index_id,
                                  apply_shell_filter=shell_filter,
-                                 debug=(i == 0))  # 首日调试
+                                 debug=(i == 0),  # 首日调试
+                                 use_ext=use_ext)
         if df is None:
             continue
-        if i == 0:  # 首日调试：确认数据流
-            print(f'  [调试] {date}: 横截面 {len(df)} 只股票')
-            print(f'         ev 范围: {df["ev"].min():.2e} ~ {df["ev"].max():.2e}')
-            print(f'         EV<0 数量: {int((df["ev"]<0).sum())}')
+        if i == 0:  # 首日调试
+            print(f'  [调试] {date}: 横截面 {len(df)} 只股票 (主信号: roe_weighted)')
+            if 'roe_weighted' in df.columns:
+                rv = df['roe_weighted'].dropna()
+                if len(rv) > 0:
+                    print(f'         roe_weighted: {rv.min():.4f} ~ {rv.max():.4f} '
+                          f'(中位 {rv.median():.4f}, 非空 {len(rv)}/{len(df)})')
+            if 'roe_spot' in df.columns:
+                rs = df['roe_spot'].dropna()
+                if len(rs) > 0:
+                    print(f'         roe_spot:   {rs.min():.4f} ~ {rs.max():.4f} '
+                          f'(中位 {rs.median():.4f})')
             print(f'         fwd_return 非空: {df["fwd_return"].notna().sum()}')
 
         ic = stats.spearmanr(df['signal'], df['fwd_return'])[0]
         if np.isnan(ic):
             continue
         ic_list.append(ic)
-        ic_binary = stats.spearmanr(df[FACTOR_BINARY], df['fwd_return'])[0]
-        ic_binary_list.append(0.0 if np.isnan(ic_binary) else ic_binary)
+        # 对照：手算当期 ROE 的 IC
+        ic_raw = stats.spearmanr(df['signal_raw'], df['fwd_return'])[0]
+        ic_ev_list.append(0.0 if np.isnan(ic_raw) else ic_raw)
         dates_list.append(date)
 
-        # Q1-Q5（按 ev 升序：Q1=最低ev=净现金最多=多头）
+        # Q1-Q5：按 roe_weighted 升序（Q5=最高ROE=多头）
+        q_col = 'signal'
         try:
-            df['group'] = pd.qcut(df['ev'].rank(method='first'), 5,
+            df['group'] = pd.qcut(df[q_col].rank(method='first'), 5,
                                   labels=['Q1', 'Q2', 'Q3', 'Q4', 'Q5'])
         except Exception:
-            df['group'] = pd.qcut(df['ev'], 5,
+            df['group'] = pd.qcut(df[q_col], 5,
                                   labels=['Q1', 'Q2', 'Q3', 'Q4', 'Q5'],
                                   duplicates='drop')
         for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']:
@@ -665,6 +799,12 @@ def analyze_sample(sample_name, index_id, variant='V1'):
         ind_dummies = pd.get_dummies(df['industry'], drop_first=True)
         sig_neu_ind = neutralize_ols(df['signal'].values, ind_dummies.values)
         ic_ind = stats.spearmanr(sig_neu_ind, df['fwd_return'].values)[0]
+
+        # 手算 ROE 中性化对照
+        raw_neu_mcap = neutralize_ols(df['signal_raw'].values, log_mcap.values)
+        ic_mcap_spot = stats.spearmanr(raw_neu_mcap, df['fwd_return'].values)[0]
+        raw_neu_ind = neutralize_ols(df['signal_raw'].values, ind_dummies.values)
+        ic_ind_spot = stats.spearmanr(raw_neu_ind, df['fwd_return'].values)[0]
 
         # 分市值档 IC
         try:
@@ -685,14 +825,15 @@ def analyze_sample(sample_name, index_id, variant='V1'):
             'date': date,
             'n': len(df),
             'rank_ic': ic,
-            'rank_ic_binary': (0.0 if np.isnan(ic_binary) else ic_binary),
+            'rank_ic_raw': (0.0 if np.isnan(ic_raw) else ic_raw),
             'ic_mcap_neutral': (np.nan if np.isnan(ic_mcap) else ic_mcap),
             'ic_ind_neutral': (np.nan if np.isnan(ic_ind) else ic_ind),
+            'ic_mcap_raw': (np.nan if np.isnan(ic_mcap_spot) else ic_mcap_spot),
+            'ic_ind_raw': (np.nan if np.isnan(ic_ind_spot) else ic_ind_spot),
             'ic_small_cap': ic_by_tier['小'],
             'ic_mid_cap': ic_by_tier['中'],
             'ic_large_cap': ic_by_tier['大'],
             'median_mcap': float(df['market_cap'].median()),
-            'n_ev_neg': int(df[FACTOR_BINARY].sum()),
         })
 
         if (i + 1) % 6 == 0:
@@ -712,19 +853,19 @@ def analyze_sample(sample_name, index_id, variant='V1'):
     win_rate = float((ic_series > 0).mean())
     pos_pct = float((ic_series > 0).sum() / len(ic_series))
     neg_pct = 1 - pos_pct
-    icb_mean, _, icb_t = newey_west_t(pd.Series(ic_binary_list), lags=4)
-    icb_std = float(pd.Series(ic_binary_list).std(ddof=1))
-    icb_ir = icb_mean / icb_std if icb_std > 0 else 0.0
 
     print('\n【表1】月度 Rank IC 描述统计')
-    print(f'  连续signal(-ev): mean={ic_mean:.6f} std={ic_std:.6f} '
+    print(f'  主信号roe_weighted: mean={ic_mean:.6f} std={ic_std:.6f} '
           f'NW-t={ic_t:.4f} IC_IR={ic_ir:.4f} 胜率={win_rate:.2%} '
           f'正/负={pos_pct:.2%}/{neg_pct:.2%}')
-    print(f'  二值factor_ev_negative: mean={icb_mean:.6f} std={icb_std:.6f} '
-          f'NW-t={icb_t:.4f} IC_IR={icb_ir:.4f}')
+    # 手算 ROE 对照
+    raw_mean, raw_std, raw_t = newey_west_t(pd.Series(ic_ev_list), lags=4)
+    raw_ir = raw_mean / raw_std if raw_std > 0 else 0
+    print(f'  对照roe_spot(手算): mean={raw_mean:.6f} std={raw_std:.6f} '
+          f'NW-t={raw_t:.4f} IC_IR={raw_ir:.4f}')
 
     # 表2
-    print('\n【表2】Q1-Q5 分组（Q1=最低ev=净现金最多=多头组）')
+    print('\n【表2】Q1-Q5 分组（Q5=最高roe_weighted=多头组）')
     for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']:
         r = q_rets[q]
         mean_m = float(np.nanmean(r))
@@ -761,10 +902,21 @@ def analyze_sample(sample_name, index_id, variant='V1'):
     s = rec_df['ic_mcap_neutral'].dropna()
     if len(s) > 1:
         m, _, t = newey_west_t(s, lags=4)
-        print(f'  市值中性化 IC: mean={m:.6f} NW-t={t:.4f} '
+        print(f'  roe_weighted 市值中性化: mean={m:.6f} NW-t={t:.4f} '
               f'IC_IR={m / float(s.std(ddof=1)):.4f} N={len(s)}')
     else:
         print('  样本不足')
+    # 裸股息率中性化对照
+    s2 = rec_df['ic_mcap_raw'].dropna()
+    if len(s2) > 1:
+        m2, _, t2 = newey_west_t(s2, lags=4)
+        print(f'  roe_spot  市值中性化: mean={m2:.6f} NW-t={t2:.4f} '
+              f'IC_IR={m2 / float(s2.std(ddof=1)):.4f} N={len(s2)}')
+    s3 = rec_df['ic_ind_raw'].dropna()
+    if len(s3) > 1:
+        m3, _, t3 = newey_west_t(s3, lags=4)
+        print(f'  roe_spot  行业中性化: mean={m3:.6f} NW-t={t3:.4f} '
+              f'IC_IR={m3 / float(s3.std(ddof=1)):.4f} N={len(s3)}')
 
     # 表6
     print('\n【表6】2019.06 断点前后分段 IC')
@@ -789,12 +941,13 @@ def analyze_sample(sample_name, index_id, variant='V1'):
     os.makedirs(OUT_DIR, exist_ok=True)
     out_ic = pd.DataFrame({
         'date': dates_list,
-        'rank_ic': ic_list,
-        'rank_ic_binary': ic_binary_list,
+        'rank_ic_filtered': ic_list,
+        'rank_ic_raw': ic_ev_list,
         'ic_mcap_neutral': rec_df['ic_mcap_neutral'].values,
         'ic_ind_neutral': rec_df['ic_ind_neutral'].values,
+        'ic_mcap_raw': rec_df['ic_mcap_raw'].values,
+        'ic_ind_raw': rec_df['ic_ind_raw'].values,
         'n': rec_df['n'].values,
-        'n_ev_neg': rec_df['n_ev_neg'].values,
     })
     out_ic.to_csv(f'{OUT_DIR}/{sample_name}_{variant}_ic_monthly.csv',
                   index=False)
@@ -810,7 +963,6 @@ def analyze_sample(sample_name, index_id, variant='V1'):
         'ic_ir': ic_ir,
         'ic_mean': ic_mean,
         'ic_t': ic_t,
-        'ic_ir_binary': icb_ir,
         'q1_monthly_mean': float(np.nanmean(q_rets['Q1'])),
         'q5_monthly_mean': float(np.nanmean(q_rets['Q5'])),
         'pre_ic_mean': pre_mean,
@@ -832,7 +984,7 @@ def run():
         r1 = analyze_sample(name, idx, variant='V1')
         if r1:
             summary.append(r1)
-        if not QUICK_TEST:  # 快速模式只跑 V1
+        if not QUICK_TEST and RUN_V2:  # 快速模式 / 关闭时只跑 V1
             r2 = analyze_sample(name, idx, variant='V2')
             if r2:
                 summary.append(r2)

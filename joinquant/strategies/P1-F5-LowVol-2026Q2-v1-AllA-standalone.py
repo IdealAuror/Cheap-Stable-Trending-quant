@@ -1,25 +1,37 @@
 """
-P1-F1-EV-2026Q2-v1-CSI500 — EV<0 因子策略（沪深300样本，standalone）
+P1-F5-LowVol-2026Q2-v1-AllA — 低波动率因子策略（全A样本，standalone）
 ====================================================================
 聚宽策略编辑器直接粘贴运行，无外部依赖。
 
-spec_id: P1-F1-EV-2026Q2-v1-CSI500
-样本: 中证500成分股
-基准: 000905.XSHG（中证500全收益）
-换仓: 季度（5/9/11 月首个交易日，对齐财报披露截止 4/30、8/31、10/31）
-持仓: 20 只等权
+spec_id: P1-F5-LowVol-2026Q2-v1-AllA
+样本: 全A股（剔除ST/次新股/金融股）
+基准: 000985.XSHG（中证全指）
+换仓: 季度（5/9/11 月首个交易日）
+持仓: 50 只，IC加权（非等权）
 成本: 万2.5双边 + 千1印花税(仅卖) + 5元最低 + 0.3%滑点
 
-因子定义（Phase 1 简化口径，原文档 §3.1）:
-  EV = market_cap + total_liability - cash_equivalents
-  factor_ev_negative = 1 if EV < 0 else 0
+因子定义（Phase 1.4，IC 验证通过）:
+  vol_60d = std(过去60交易日日收益率)
+  signal = -vol_60d（取负，低波动=高信号=IC>0有效）
 
-过滤条件:
-  - factor_ev_negative == 1
-  - net_profit > 0
-  - debt_to_assets <= 1.0
+选股方式:
+  - 按 signal 降序排序（低波动优先）
+  - 取前 50 只
+  - 权重按 signal 横截面 z-score 归一化（IC加权）
 
-口径来源: docs/PROJECT-PLAN.md §1, research/theory-framework.md §5.1
+Gate 1 结论（2026-06-27，详见 research/decisions/P1-F1-EV-2026Q2-v1-decision.md）:
+  - 市值中性化后 IC t=3.17（大幅过门槛）
+  - 行业中性化后 IC t=3.70（大幅过门槛）
+  - 七条 6/7 过，形式表现优于 F2-EP
+  - Q 分组倒 U 型（非单调），故用全截面IC加权而非Q5多头
+  - 定位：风险管理因子（降波动/提夏普），非收益主力
+
+数据链简化:
+  - 仅需 get_price 算波动率，无需查 balance/income/cash_flow
+  - 无财务字段名探测陷阱
+  - 金融股剔除保留（银行天然低波动，不剔会主导信号）
+
+口径来源: research/decisions/P1-F1-EV-2026Q2-v1-decision.md Phase 1.4 终判
 """
 
 import datetime
@@ -29,7 +41,7 @@ import pandas as pd
 # 聚宽策略环境自动注入（无需 import）:
 #   jqdata, get_fundamentals, query, valuation, balance, income, cash_flow,
 #   get_index_stocks, get_all_securities, get_extras, get_security_info, get_price,
-#   set_benchmark, set_order_cost, OrderCost, set_slippage, PriceSlippage,
+#   get_industry, set_benchmark, set_order_cost, OrderCost, set_slippage, PriceSlippage,
 #   order_target_percent, log, g, run_monthly
 
 
@@ -116,7 +128,7 @@ def _safe_order_target_percent(context, code, weight):
 # ============================================================
 
 def get_stock_pool(index_id, date_str, min_listed_days=180):
-    """构建股票池：指数成分股 - ST - 次新股。"""
+    """构建股票池：指数成分股 - ST - 次新股 - 金融股。"""
     if index_id is None:
         sec_df = get_all_securities(['stock'], date=date_str)
         stocks = list(sec_df.index)
@@ -130,7 +142,34 @@ def get_stock_pool(index_id, date_str, min_listed_days=180):
             stocks = [s for s in stocks if s in st_today.index and not st_today[s]]
     # 次新股剔除
     stocks = [s for s in stocks if not is_new_stock(s, date_str, min_listed_days)]
+    # 金融股剔除（sw_l1 严格相等，银行I/非银金融I）
+    if stocks:
+        stocks = exclude_finance_stocks(stocks, date_str)
     return stocks
+
+
+def exclude_finance_stocks(stocks, date_str):
+    """剔除金融行业股票（银行/非银金融），sw_l1 严格相等匹配。"""
+    if not stocks:
+        return stocks
+    try:
+        ind = get_industry(stocks, date=date_str)
+    except Exception:
+        return stocks
+    if not ind:
+        return stocks
+    FINANCE_NAMES = {'银行I', '非银金融I'}
+    finance_codes = set()
+    for code, schemes in ind.items():
+        if not isinstance(schemes, dict):
+            continue
+        sw_l1 = schemes.get('sw_l1')
+        if not isinstance(sw_l1, dict):
+            continue
+        name = str(sw_l1.get('industry_name', '') or '')
+        if name in FINANCE_NAMES:
+            finance_codes.add(code)
+    return [s for s in stocks if s not in finance_codes]
 
 
 def is_new_stock(code, date_str, days=180):
@@ -268,41 +307,81 @@ def apply_cost_model():
 
 
 # ============================================================
-# 五、F1 因子计算（EV<0，Phase 1 简化口径）
+# 五、F5 因子计算（低波动率，Phase 1.4 IC 验证通过）
 # ============================================================
 
-def calculate_ev_factor(df):
-    """计算 EV<0 因子及过滤指标。
+VOL_LOOKBACK = 60       # 主信号：60交易日（约3个月）
+VOL_MIN_OBS_RATIO = 0.5  # 有效观测数下限 = lookback * 0.5
 
-    Phase 1 简化口径（原文档 §3.1 + PROJECT-PLAN §1.3）:
-      EV = market_cap + total_liability - cash_equivalents
 
-    输入 df 必须含列（聚宽确定存在）:
-      market_cap, total_liability, cash_equivalents, total_assets, net_profit
+def calc_realized_volatility(date_str, stocks, lookback_days=60):
+    """计算实现波动率：过去 lookback_days 交易日日收益率标准差。
+
+    使用 get_price(count=lookback_days+1) 取 trailing 日收盘价，
+    pct_change 算日收益率后取 std。count+1 因 pct_change 丢首行。
+
+    返回 {code: vol}，vol = std(daily returns)。
+    有效观测 < lookback_days * VOL_MIN_OBS_RATIO 的股票不返回（新股/长期停牌）。
     """
-    df['ev'] = df['market_cap'] + df['total_liability'] - df['cash_equivalents']
-    df['factor_ev_negative'] = (df['ev'] < 0).astype(int)
-    df['debt_to_assets'] = df['total_liability'] / df['total_assets'].replace(0, np.nan)
-    return df
+    if not stocks:
+        return {}
+    try:
+        df = get_price(stocks, end_date=date_str, count=lookback_days + 1,
+                       fields=['close'], skip_paused=False,
+                       panel=False, fq='post')
+        if df is None or df.empty:
+            return {}
+        if 'time' in df.columns:
+            df = df.set_index('time')
+        elif 'date' in df.columns:
+            df = df.set_index('date')
+        if 'code' in df.columns:
+            close = df.pivot_table(index=df.index, columns='code', values='close')
+        else:
+            close = df
+        close.index = pd.to_datetime(close.index)
+    except Exception:
+        return {}
+
+    if close is None or close.empty:
+        return {}
+
+    rets = close.pct_change()
+    vol = rets.std(skipna=True)
+    valid_counts = rets.count()
+    min_obs = int(lookback_days * VOL_MIN_OBS_RATIO)
+
+    result = {}
+    for code in stocks:
+        if code not in vol.index:
+            continue
+        cnt = valid_counts.get(code, 0)
+        if cnt < min_obs:
+            continue
+        v = vol[code]
+        if not np.isnan(v) and v > 0:
+            result[code] = float(v)
+    return result
 
 
 # ============================================================
 # 六、策略主体
 # ============================================================
 
-INDEX_ID = '000905.XSHG'
-BENCHMARK = '000905.XSHG'
+INDEX_ID = None  # None 表示全 A
+BENCHMARK = '000985.XSHG'  # 中证全指
 
 
 def initialize(context):
     set_benchmark(BENCHMARK)
     apply_cost_model()
-    g.stock_num = 20
+    g.stock_num = 50  # 持仓数量
     g.index_id = INDEX_ID
-    run_monthly(rebalance, monthday=1)
+    run_monthly(factor_rebalance, monthday=1)
 
 
-def rebalance(context):
+def factor_rebalance(context):
+    """季频因子选股：5/9/11 月，计算 IC 加权目标权重。"""
     current_date = context.current_dt
     if current_date.month not in (5, 9, 11):
         return
@@ -314,52 +393,40 @@ def rebalance(context):
         log.info('[%s] 股票池为空' % date_str)
         return
 
-    # 2. 财务数据（仅聚宽确定存在的字段）
-    q = query(
-        valuation.code,
-        valuation.market_cap,
-        balance.total_liability,
-        balance.cash_equivalents,
-        balance.total_assets,
-        income.net_profit,
-    ).filter(valuation.code.in_(stocks))
-    df = get_fundamentals(q, date=date_str)
-
-    if df is None or df.empty:
-        log.info('[%s] 无财务数据' % date_str)
+    # 2. 波动率因子（仅需 get_price，无需查财务表）
+    vol_map = calc_realized_volatility(date_str, stocks, VOL_LOOKBACK)
+    if not vol_map:
+        log.info('[%s] 无波动率数据' % date_str)
         return
 
-    df = df.set_index('code')
-
-    # 3. 关键字段缺失剔除
-    critical = ['market_cap', 'total_liability', 'cash_equivalents',
-                'total_assets', 'net_profit']
-    df = df.dropna(subset=critical)
-
-    # 4. 因子计算
-    df = calculate_ev_factor(df)
-
-    # 5. 过滤：EV<0 + 净利润>0 + 资产负债率<=1
-    mask = df['factor_ev_negative'] == 1
-    mask &= df['net_profit'] > 0
-    mask &= df['debt_to_assets'] <= 1.0
-    df = df[mask]
+    # 3. 构建因子 DataFrame
+    df = pd.DataFrame({'vol_60d': pd.Series(vol_map)})
+    df['signal'] = -df['vol_60d']  # 低波动=高信号
+    df = df.dropna(subset=['signal'])
 
     if df.empty:
-        log.info('[%s] 无符合条件的 EV<0 股票' % date_str)
+        log.info('[%s] 无符合条件的 LowVol 股票' % date_str)
         return
 
-    # 6. 取前 N 只等权
-    df = df.head(g.stock_num)
-    target_weights = {code: 1.0 / len(df) for code in df.index}
+    # 4. IC加权选股：按 signal 降序取前 N，权重按 z-score 归一化
+    df = df.sort_values('signal', ascending=False).head(g.stock_num)
 
-    log.info('[%s] 调仓：买入 %d 只股票' % (date_str, len(df)))
-    for code in df.index:
-        log.info('  买入 %s  ev=%.2f dta=%.2f' % (
-            code, df.loc[code, 'ev'], df.loc[code, 'debt_to_assets'],
-        ))
+    sig_vals = df['signal'].values
+    z = (sig_vals - sig_vals.mean()) / (sig_vals.std() if sig_vals.std() > 0 else 1)
+    weights = np.where(z > 0, z, 0)
+    if weights.sum() == 0:
+        weights = np.ones(len(df))
+    weights = weights / weights.sum()
+    g.target_weights = {code: float(w) for code, w in zip(df.index, weights)}
 
-    rebalance_ordered(context, target_weights)
+    log.info('[%s] 调仓：买入 %d 只股票 (IC加权)' % (date_str, len(df)))
+    for code, w in list(g.target_weights.items())[:5]:
+        log.info('  买入 %s  vol=%.4f  w=%.2f%%' % (
+            code, df.loc[code, 'vol_60d'], w * 100))
+    if len(g.target_weights) > 5:
+        log.info('  ... 共 %d 只' % len(g.target_weights))
+
+    rebalance_ordered(context, g.target_weights)
 
 
 def before_trading_start(context):
