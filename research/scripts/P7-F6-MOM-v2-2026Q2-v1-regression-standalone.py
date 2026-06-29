@@ -10,9 +10,11 @@ Phase 7 探索脚本：验证加权对数回归动量是否优于两点法（61-
 
 对比版本：
   1. f2f5f6_40d         : 两点法 61-21（当前生产版本，baseline）
-  2. f2f5f6_wreg        : 加权回归斜率年化（linspace(1,2,40) 权重）
+  2. f2f5f6_wreg        : 加权回归斜率年化（40d信号窗口）
   3. f2f5f6_wreg_r2     : 加权回归动量 × R²（趋势稳定性加权）
   4. f2f5f6_40d_r2filt  : 两点法 + R²<0.4 过滤（剔除假动量）
+  5. f2f5f6_wreg24d     : 加权回归（24d短窗口，七星高照原码参数）
+  6. f2f5f6_wreg_r2sq   : 加权回归动量 × R²²（更严格惩罚低R²）
 
 防过拟合红线：
   - 训练集 2014-2020，验证集 2021-2026
@@ -147,6 +149,10 @@ OUT_DIR = 'results/P7-F6-MOM-v2-2026Q2-v1'
 # P7 加权回归动量参数
 R2_FILTER_THRESHOLD = 0.4     # R² 过滤阈值（参考七星高照 v3.0）
 WREG_WEIGHT_END = 2.0         # 加权回归近期权重上限（linspace(1, WREG_WEIGHT_END, n)）
+
+# 24 天短窗口版本（七星高照原码参数 LOOKBACK_DAYS=24）
+# 信号窗口 = 24 + 21(skip) = 45 天，取 t-22 到 t-45 的收盘价
+MOM_LOOKBACK_LONG_24D = 45    # 45 天 = 21(剔除) + 24(信号)
 
 # 训练/验证集分割（防过拟合红线）
 TRAIN_END = '2020-12-31'      # 训练集截止日
@@ -429,6 +435,11 @@ def _calc_momentum_weighted_regression(date_str, stocks,
     信号窗口 = lookback_long - skip_recent = 61 - 21 = 40 天
     取 t-22 到 t-61 的收盘价（跳过最近21天避免短期反转污染）
 
+    R² 计算说明（与七星高照原码一致）：
+    - ss_res 用加权残差平方和
+    - ss_tot 用未加权均值 np.mean(y)（非加权均值）
+    这在统计上略不严谨（加权回归应配加权均值），但为复现原策略保持一致
+
     返回 (mom_map, r2_map)。
     """
     if not stocks:
@@ -496,8 +507,8 @@ def _calc_momentum_weighted_regression(date_str, stocks,
             slope = coeffs[0]
             intercept = coeffs[1]
             y_pred = slope * x + intercept
-            # 加权 R²
-            y_mean = np.average(y, weights=weights)
+            # 加权 R²（与七星高照原码一致：ss_tot 用未加权均值）
+            y_mean = np.mean(y)
             ss_res = np.sum(weights * (y - y_pred) ** 2)
             ss_tot = np.sum(weights * (y - y_mean) ** 2)
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
@@ -691,7 +702,7 @@ def build_cross_section(date, mode='baseline', debug=False):
     # F6 动量
     use_f6 = mode in ('f2f5f6', 'f2f5f6_6_1', 'f2f5f6_40d', 'f2f5f6_consistency',
                       'f2f5_neg_f6_40d', 'f2f5f6_wreg', 'f2f5f6_wreg_r2',
-                      'f2f5f6_40d_r2filt')
+                      'f2f5f6_40d_r2filt', 'f2f5f6_wreg24d', 'f2f5f6_wreg_r2sq')
     if use_f6:
         if mode == 'f2f5f6':
             # 12-1 momentum（默认长窗口 252，信号长度231天）
@@ -715,18 +726,26 @@ def build_cross_section(date, mode='baseline', debug=False):
                                      skip_recent=MOM_SKIP_RECENT)
             df['F6_mom_raw'] = df.index.map(lambda c: mom_map.get(c, np.nan))
             mask &= df['F6_mom_raw'].notna() & np.isfinite(df['F6_mom_raw'])
-        elif mode in ('f2f5f6_wreg', 'f2f5f6_wreg_r2'):
+        elif mode in ('f2f5f6_wreg', 'f2f5f6_wreg_r2', 'f2f5f6_wreg24d',
+                      'f2f5f6_wreg_r2sq'):
             # P7: 加权对数回归动量（参考七星高照 v3.0 方法论）
+            wreg_lookback = MOM_LOOKBACK_LONG_24D if mode == 'f2f5f6_wreg24d' \
+                            else MOM_LOOKBACK_LONG_40D
             wreg_mom, wreg_r2 = _calc_momentum_weighted_regression(
                 date_str, list(df.index),
-                lookback_long=MOM_LOOKBACK_LONG_40D,
+                lookback_long=wreg_lookback,
                 skip_recent=MOM_SKIP_RECENT)
-            if mode == 'f2f5f6_wreg':
+            if mode in ('f2f5f6_wreg', 'f2f5f6_wreg24d'):
                 df['F6_mom_raw'] = df.index.map(lambda c: wreg_mom.get(c, np.nan))
-            else:
-                # wreg_r2: 动量 × R²（趋势稳定性加权）
+            elif mode == 'f2f5f6_wreg_r2':
+                # 动量 × R²（趋势稳定性加权）
                 df['F6_mom_raw'] = df.index.map(
                     lambda c: wreg_mom.get(c, np.nan) * wreg_r2.get(c, 0)
+                    if c in wreg_mom else np.nan)
+            else:
+                # f2f5f6_wreg_r2sq: 动量 × R²²（更严格惩罚低R²，七星高照注释变体）
+                df['F6_mom_raw'] = df.index.map(
+                    lambda c: wreg_mom.get(c, np.nan) * wreg_r2.get(c, 0) ** 2
                     if c in wreg_mom else np.nan)
             mask &= df['F6_mom_raw'].notna() & np.isfinite(df['F6_mom_raw'])
         elif mode == 'f2f5f6_40d_r2filt':
@@ -810,7 +829,8 @@ def build_portfolio(df, mode='baseline', n_hold=N_HOLD):
         df['F6_z'] = zscore_cross_section(df['F6_mom'])
         df['score'] = (1.0 / 3.0) * df['F2_z'] + (1.0 / 3.0) * df['F5_z'] - (1.0 / 3.0) * df['F6_z']
     elif mode in ('f2f5f6', 'f2f5f6_6_1', 'f2f5f6_40d', 'f2f5f6_consistency',
-                  'f2f5f6_wreg', 'f2f5f6_wreg_r2', 'f2f5f6_40d_r2filt'):
+                  'f2f5f6_wreg', 'f2f5f6_wreg_r2', 'f2f5f6_40d_r2filt',
+                  'f2f5f6_wreg24d', 'f2f5f6_wreg_r2sq'):
         df['F6_z'] = zscore_cross_section(df['F6_mom'])
         # 三因子等权（各 1/3）
         df['score'] = (1.0 / 3.0) * df['F2_z'] + (1.0 / 3.0) * df['F5_z'] + (1.0 / 3.0) * df['F6_z']
@@ -1480,9 +1500,11 @@ def run_p7():
 
     P7_VERSIONS = [
         ('f2f5f6_40d',        '两点法61-21 (baseline)'),
-        ('f2f5f6_wreg',       '加权回归动量'),
-        ('f2f5f6_wreg_r2',    '加权回归xR2'),
+        ('f2f5f6_wreg',       '加权回归动量(40d)'),
+        ('f2f5f6_wreg_r2',    '加权回归xR2(40d)'),
         ('f2f5f6_40d_r2filt', '两点法+R2过滤'),
+        ('f2f5f6_wreg24d',    '加权回归动量(24d)'),
+        ('f2f5f6_wreg_r2sq',  '加权回归xR2^2(40d)'),
     ]
     baseline_mode = 'f2f5f6_40d'
 
