@@ -2,12 +2,19 @@
 
 # 🌱 cst-quant · 低估分散量化
 
-> CST = Cheap · Stable · Trending。A 股多因子策略：低估分散平均赢 — 50 只等权，季度调仓，始终满仓。
+> A 股深度价值量化策略，借鉴格系"捡烟蒂"投资理念。
+> 三个透明因子 — 低估、低波、趋势动量 — 等权合成，
+> 50 只等权重持仓，季度调仓，始终满仓。不择时、不看宏观、不依赖黑箱模型。
+
+**核心成果** — 2014-01 ~ 2026-06（12.5年）：累计收益 **+776.27%**（基准 +121.24%），
+年化 **+19.08%**，夏普 **0.67**，最大回撤 −37.18%。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: JoinQuant](https://img.shields.io/badge/平台-聚宽-blue)](#)
-[![Backtest: 2013–2026](https://img.shields.io/badge/回测-2013.12–2026.06-orange)](#)
-[![Annual Return: 19.08%](https://img.shields.io/badge/年化-19.08%25-brightgreen)](#)
+[![Backtest: 2013–2026](https://img.shields.io/badge/回测-2014.01–2026.06-orange)](#)
+[![Sharpe: 0.67](https://img.shields.io/badge/夏普-0.67-brightgreen)](#)
+[![Annual Return: 19%](https://img.shields.io/badge/年化-19.08%25-brightgreen)](#)
+[![Status: Production](https://img.shields.io/badge/状态-生产就绪-success)](#)
 
 ---
 
@@ -85,8 +92,8 @@ cst-quant/
 
 ### 本地环境
 ```bash
-git clone https://github.com/IdealAuror/epic-leek-quant.git
-cd epic-leek-quant
+git clone https://github.com/IdealAuror/Cheap-Stable-Trending-quant.git
+cd Cheap-Stable-Trending-quant
 pip install -r requirements.txt
 ```
 

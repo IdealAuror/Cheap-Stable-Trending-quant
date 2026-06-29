@@ -1,13 +1,21 @@
 [English](README.md) | [中文](README-zh.md)
 
-# 🌱 cst-quant
+# 🌱 cst-quant · Cheap · Stable · Trending
 
-> CST = Cheap · Stable · Trending. Multi-factor A-share strategy: buy undervalued, stable, momentum stocks — 50 equal-weight, quarterly rebalance, always fully invested.
+> A-share deep-value quantitative strategy, inspired by Graham-style "cigar butt" investing.
+> Three transparent factors — cheap valuation, low volatility, trend momentum — equally weighted,
+> 50 stocks, quarterly rebalancing, always fully invested. No market timing, no macro calls,
+> no black boxes.
+
+**Key Result** — 2014-01 ~ 2026-06 (12.5 yrs): **+776.27%** cumulative return vs benchmark +121.24%,
+annualized **+19.08%**, Sharpe **0.67**, max drawdown −37.18%.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: JoinQuant](https://img.shields.io/badge/Platform-JoinQuant-blue)](#)
 [![Backtest: 2014–2026](https://img.shields.io/badge/Backtest-2014.01–2026.06-orange)](#)
 [![Sharpe: 0.67](https://img.shields.io/badge/Sharpe-0.67-brightgreen)](#)
+[![Annual Return: 19%](https://img.shields.io/badge/Annual_Return-19.08%25-brightgreen)](#)
+[![Status: Production](https://img.shields.io/badge/Status-Production-success)](#)
 
 ---
 
@@ -85,8 +93,8 @@ cst-quant/
 
 ### Locally (code review / IDE)
 ```bash
-git clone https://github.com/IdealAuror/cst-quant.git
-cd cst-quant
+git clone https://github.com/IdealAuror/Cheap-Stable-Trending-quant.git
+cd Cheap-Stable-Trending-quant
 pip install -r requirements.txt
 ```
 
