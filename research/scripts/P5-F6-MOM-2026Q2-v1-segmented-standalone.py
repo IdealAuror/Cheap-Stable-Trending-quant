@@ -130,11 +130,19 @@ OUT_DIR = 'results/P5-F6-MOM-2026Q2-v1'
 # QUICK_TEST=True 只跑前 6 个调仓日验证数据链
 QUICK_TEST = False
 
-# 跨样本验证模式：True 时只跑 baseline + 40d+ 两版本对比（不用 PRECOMPUTED）
+# 跨样本验证模式：True 时一次性跑 AllA + CSI300 + CSI500 三个样本
+# 每个样本跑 baseline + 40d+ 两版本对比，输出对比汇总表（不用 PRECOMPUTED）
 # 用于确认 F6 在 CSI300/CSI500 大盘股是否有效（规避 F1 壳价值污染教训）
-# 使用方法：① 设 CROSS_SAMPLE_MODE=True ② 改 SAMPLE_NAME='CSI300' ③ 运行
+# 使用方法：设 CROSS_SAMPLE_MODE=True 即可，无需手动切换 SAMPLE_NAME
 # 验证标准：40d+ Sharpe >= 0.3 且不显著跑输 baseline（大盘股动量弱预期）
-CROSS_SAMPLE_MODE = False
+CROSS_SAMPLE_MODE = True
+
+# 跨样本验证的样本列表（无需修改，run_cross_sample 自动遍历）
+CROSS_SAMPLES = [
+    ('AllA', '000985.XSHG'),    # 中证全指（全A股，对照基准）
+    ('CSI300', '000300.XSHG'),  # 沪深300（大盘股）
+    ('CSI500', '000905.XSHG'),  # 中证500（中盘股）
+]
 
 
 def _get_sample_index_id():
@@ -1077,36 +1085,35 @@ def run():
 
 
 def run_cross_sample():
-    """Cross-sample verification: run baseline + 40d+ for CSI300/CSI500.
+    """Cross-sample verification: run baseline + 40d+ for AllA/CSI300/CSI500 at once.
 
     Purpose: F6 was only validated on AllA. F1 lesson (shell value pollution)
     warns that factors effective on AllA may fail on large-cap stocks.
-    This mode runs two versions (baseline + 40d+) to confirm F6 effectiveness
-    on CSI300/CSI500.
+    This mode runs two versions (baseline + 40d+) on three samples in one pass,
+    outputs a side-by-side comparison table + a summary gate check.
 
     Usage:
       1. Set CROSS_SAMPLE_MODE = True
-      2. Set SAMPLE_NAME = 'CSI300' (or 'CSI500')
-      3. Set BENCHMARK_CODE = '000300.XSHG' (or '000905.XSHG')
-      4. Run in JoinQuant research environment
+      2. Run in JoinQuant research environment (no need to switch SAMPLE_NAME)
 
-    Pass criteria:
+    Pass criteria (per sample):
       - 40d+ Sharpe >= 0.3 (large-cap momentum expected to be weaker)
       - 40d+ does not significantly underperform baseline (excess >= -10pp)
+      - Segment 5 (core asset bull market) excess >= -10pp (F6 should fix seg5)
     """
+    global SAMPLE_NAME, BENCHMARK_CODE
     os.makedirs(OUT_DIR, exist_ok=True)
 
     print('=' * 70)
-    print('Phase 5 F6-MOM Cross-Sample Verification (baseline vs 40d+)')
+    print('Phase 5 F6-MOM Cross-Sample Verification (AllA + CSI300 + CSI500)')
     print('=' * 70)
-    print('Sample: %s' % SAMPLE_NAME)
-    print('Benchmark: %s' % BENCHMARK_CODE)
     print('Period: %s ~ %s' % (START_DATE, END_DATE))
     print('Capital: %d wan' % (TARGET_CAPITAL / 1e4))
-    print('Versions: baseline (F2+F5) vs 40d+ (F2+F5+F6)')
+    print('Versions: baseline (F2+F5) vs 40d+ (F2+F5+F6, 61-21 momentum)')
+    print('Samples: %s' % ', '.join([s[0] for s in CROSS_SAMPLES]))
     print('=' * 70)
 
-    # 1. Rebalance dates
+    # 1. Rebalance dates (shared across samples)
     rebal_dates = get_rebalance_dates(START_DATE, END_DATE)
     if QUICK_TEST:
         rebal_dates = rebal_dates[:6]
@@ -1121,112 +1128,183 @@ def run_cross_sample():
     last_date = rebal_dates[-1]
     date_pairs.append((last_date, pd.Timestamp(END_DATE).date()))
 
-    # 2. Run baseline
-    print('\n>>> Running baseline (F2+F5) ...')
-    base_nav, base_records = compute_daily_nav(
-        date_pairs, mode='baseline', target_capital=TARGET_CAPITAL)
+    # 2. Run each sample: baseline + 40d+
+    all_results = {}  # {sample_name: {'base_stats':..., 'f40_stats':..., 'base_turn':, 'f40_turn':, 'benchmark_nav':}}
+    for sample_name, benchmark_code in CROSS_SAMPLES:
+        print('\n' + '#' * 70)
+        print('# Sample: %s (benchmark: %s)' % (sample_name, benchmark_code))
+        print('#' * 70)
 
-    # 3. Run 40d+
-    print('\n>>> Running f2f5f6_40d (F2+F5+F6, 40d momentum) ...')
-    f40_nav, f40_records = compute_daily_nav(
-        date_pairs, mode='f2f5f6_40d', target_capital=TARGET_CAPITAL)
+        # Switch global sample
+        SAMPLE_NAME = sample_name
+        BENCHMARK_CODE = benchmark_code
 
-    # 4. Benchmark
-    print('\n>>> Loading benchmark ...')
-    benchmark_nav = compute_benchmark_nav()
-    if benchmark_nav is None:
-        print('Benchmark load failed, cannot compute Alpha')
+        # Run baseline
+        print('\n>>> [%s] Running baseline (F2+F5) ...' % sample_name)
+        base_nav, base_records = compute_daily_nav(
+            date_pairs, mode='baseline', target_capital=TARGET_CAPITAL)
+
+        # Run 40d+
+        print('\n>>> [%s] Running f2f5f6_40d (F2+F5+F6, 40d momentum) ...' % sample_name)
+        f40_nav, f40_records = compute_daily_nav(
+            date_pairs, mode='f2f5f6_40d', target_capital=TARGET_CAPITAL)
+
+        # Benchmark
+        print('\n>>> [%s] Loading benchmark ...' % sample_name)
+        benchmark_nav = compute_benchmark_nav()
+        if benchmark_nav is None:
+            print('Benchmark load failed for %s, skipping' % sample_name)
+            continue
+
+        # Segment stats
+        base_stats = [compute_full_stats(base_nav, benchmark_nav)]
+        f40_stats = [compute_full_stats(f40_nav, benchmark_nav)]
+        for seg_name, start, end in SEGMENTS:
+            base_stats.append(compute_segment_stats(
+                base_nav, benchmark_nav, seg_name, start, end))
+            f40_stats.append(compute_segment_stats(
+                f40_nav, benchmark_nav, seg_name, start, end))
+
+        all_results[sample_name] = {
+            'base_stats': base_stats,
+            'f40_stats': f40_stats,
+            'base_turn': np.mean([r['turnover'] for r in base_records]),
+            'f40_turn': np.mean([r['turnover'] for r in f40_records]),
+            'benchmark_nav': benchmark_nav,
+        }
+
+        # Save per-sample CSV
+        suffix = sample_name.lower()
+        df_out = pd.DataFrame(f40_stats)
+        df_out['version'] = 'f2f5f6_40d'
+        df_out['sample'] = sample_name
+        df_out.to_csv('%s/cross_sample_40d_%s.csv' % (OUT_DIR, suffix), index=False)
+        nav_df = pd.DataFrame({
+            'baseline_%s' % suffix: base_nav,
+            'f2f5f6_40d_%s' % suffix: f40_nav,
+            'benchmark': benchmark_nav,
+        })
+        nav_df.to_csv('%s/daily_nav_cross_%s.csv' % (OUT_DIR, suffix))
+        print('>>> [%s] CSV saved (cross_sample_40d_%s.csv + daily_nav_cross_%s.csv)'
+              % (sample_name, suffix, suffix))
+
+    if not all_results:
+        print('\nNo sample completed successfully, exiting')
         return
 
-    # 5. Segment stats for both versions
+    # 3. Comparison Table 1: Full-sample core metrics across samples
     print('\n' + '=' * 70)
-    print('Cross-Sample Results')
+    print('[Table 1] Full-Sample Core Metrics Across Samples')
+    print('=' * 70)
+    print('%-10s %-10s %10s %10s %10s %10s %10s' % (
+        'Sample', 'Version', 'Return', 'Sharpe', 'DD', 'Alpha', 'Turnover'))
+    for sample_name in [s[0] for s in CROSS_SAMPLES]:
+        if sample_name not in all_results:
+            continue
+        r = all_results[sample_name]
+        bs = r['base_stats'][0]
+        fs = r['f40_stats'][0]
+        print('%-10s %-10s %9.2f%% %9.2f %9.2f%% %9.3f %9.3f' % (
+            sample_name, 'baseline',
+            bs['strategy_return'] * 100, bs['sharpe'],
+            bs['max_drawdown'] * 100,
+            bs['alpha'] if not np.isnan(bs['alpha']) else 0,
+            r['base_turn']))
+        print('%-10s %-10s %9.2f%% %9.2f %9.2f%% %9.3f %9.3f' % (
+            sample_name, '40d+',
+            fs['strategy_return'] * 100, fs['sharpe'],
+            fs['max_drawdown'] * 100,
+            fs['alpha'] if not np.isnan(fs['alpha']) else 0,
+            r['f40_turn']))
+
+    # 4. Comparison Table 2: Excess (40d+ vs baseline) across samples and segments
+    print('\n' + '=' * 70)
+    print('[Table 2] 40d+ Excess vs Baseline by Segment (pp)')
+    print('=' * 70)
+    header = '%-22s' % 'Segment'
+    for sample_name in [s[0] for s in CROSS_SAMPLES]:
+        if sample_name in all_results:
+            header += ' %10s' % sample_name
+    print(header)
+    seg_labels = ['全样本'] + [s[0] for s in SEGMENTS]
+    for seg_idx in range(len(SEGMENTS) + 1):
+        line = '%-22s' % seg_labels[seg_idx]
+        for sample_name in [s[0] for s in CROSS_SAMPLES]:
+            if sample_name not in all_results:
+                continue
+            r = all_results[sample_name]
+            diff = (r['f40_stats'][seg_idx]['excess']
+                    - r['base_stats'][seg_idx]['excess']) * 100
+            line += ' %9.2fpp' % diff
+        print(line)
+
+    # 5. Summary Gate Check across samples
+    print('\n' + '=' * 70)
+    print('[Table 3] Cross-Sample Gate Check Summary')
+    print('=' * 70)
+    print('%-10s %-22s %-22s %-22s %-10s' % (
+        'Sample', '[1] 40d+ Sharpe>=0.3', '[2] Excess>=-10pp',
+        '[3] Seg5 Excess>=-10pp', 'Verdict'))
+    overall_pass = True
+    for sample_name in [s[0] for s in CROSS_SAMPLES]:
+        if sample_name not in all_results:
+            continue
+        r = all_results[sample_name]
+        f40_sharpe = r['f40_stats'][0]['sharpe']
+        f40_excess_vs_base = (r['f40_stats'][0]['excess']
+                              - r['base_stats'][0]['excess']) * 100
+        seg5_f40_excess = r['f40_stats'][5]['excess'] * 100
+
+        c1 = f40_sharpe >= 0.3
+        c2 = f40_excess_vs_base >= -10
+        c3 = seg5_f40_excess >= -10
+        # For AllA, seg5 must PASS (it's the original validation sample)
+        # For CSI300/CSI500, seg5 is informational (large-cap may not fix seg5)
+        sample_pass = c1 and c2
+        if sample_name == 'AllA':
+            sample_pass = sample_pass and c3
+        if not sample_pass:
+            overall_pass = False
+
+        print('%-10s %-22s %-22s %-22s %-10s' % (
+            sample_name,
+            '%.2f %s' % (f40_sharpe, 'PASS' if c1 else 'FAIL'),
+            '%.2fpp %s' % (f40_excess_vs_base, 'PASS' if c2 else 'FAIL'),
+            '%.2fpp %s' % (seg5_f40_excess, 'PASS' if c3 else 'WARN'),
+            'PASS' if sample_pass else 'FAIL'))
+
+    print('\n' + '=' * 70)
+    if overall_pass:
+        print('OVERALL: PASS - F6 effectiveness confirmed across all samples')
+        print('Phase 5 cross-sample verification complete, project can close')
+    else:
+        print('OVERALL: FAIL - F6 may be ineffective on some samples')
+        print('Review per-sample results above before closing Phase 5')
     print('=' * 70)
 
-    base_stats = [compute_full_stats(base_nav, benchmark_nav)]
-    f40_stats = [compute_full_stats(f40_nav, benchmark_nav)]
-    for seg_name, start, end in SEGMENTS:
-        base_stats.append(compute_segment_stats(
-            base_nav, benchmark_nav, seg_name, start, end))
-        f40_stats.append(compute_segment_stats(
-            f40_nav, benchmark_nav, seg_name, start, end))
-
-    # 6. Output comparison table
-    print('\n[Table 1] Cross-Sample: baseline vs 40d+ (%s)' % SAMPLE_NAME)
-    print('%-22s %-22s %10s %10s %10s %8s %8s %8s %6s' % (
-        'Segment', 'Period', 'BaseRet', 'F40Ret', 'Excess', 'Alpha', 'Sharpe', 'DD', 'Days'))
-    for i, (b, f) in enumerate(zip(base_stats, f40_stats)):
-        diff_excess = (f['excess'] - b['excess']) * 100
-        print('%-22s %-22s %9.2f%% %9.2f%% %9.2fpp %7.3f %7.2f %7.2f%% %5d' % (
-            b['segment'], b['period'],
-            b['strategy_return'] * 100, f['strategy_return'] * 100,
-            diff_excess,
-            f['alpha'] if not np.isnan(f['alpha']) else 0,
-            f['sharpe'], f['max_drawdown'] * 100, f['n_days']))
-
-    # 7. Full-sample core metrics
-    print('\n[Table 2] Full-Sample Core Metrics (%s)' % SAMPLE_NAME)
-    print('%-15s %10s %10s %10s %10s %10s' % (
-        'Version', 'Return', 'Sharpe', 'DD', 'Alpha', 'Turnover'))
-    base_turn = np.mean([r['turnover'] for r in base_records])
-    f40_turn = np.mean([r['turnover'] for r in f40_records])
-    print('%-15s %9.2f%% %9.2f %9.2f%% %9.3f %9.3f' % (
-        'baseline', base_stats[0]['strategy_return'] * 100,
-        base_stats[0]['sharpe'], base_stats[0]['max_drawdown'] * 100,
-        base_stats[0]['alpha'] if not np.isnan(base_stats[0]['alpha']) else 0,
-        base_turn))
-    print('%-15s %9.2f%% %9.2f %9.2f%% %9.3f %9.3f' % (
-        'f2f5f6_40d', f40_stats[0]['strategy_return'] * 100,
-        f40_stats[0]['sharpe'], f40_stats[0]['max_drawdown'] * 100,
-        f40_stats[0]['alpha'] if not np.isnan(f40_stats[0]['alpha']) else 0,
-        f40_turn))
-
-    # 8. Gate check
-    print('\n' + '=' * 70)
-    print('Cross-Sample Gate Check (%s)' % SAMPLE_NAME)
-    print('=' * 70)
-    f40_sharpe = f40_stats[0]['sharpe']
-    f40_excess_vs_base = (f40_stats[0]['excess'] - base_stats[0]['excess']) * 100
-    print('\n[1] 40d+ Sharpe >= 0.3:')
-    print('    40d+ Sharpe = %.2f' % f40_sharpe)
-    if f40_sharpe >= 0.3:
-        print('    PASS (>= 0.3)')
-    else:
-        print('    FAIL (< 0.3, F6 may be ineffective on %s)' % SAMPLE_NAME)
-
-    print('\n[2] 40d+ excess vs baseline >= -10pp:')
-    print('    40d+ excess vs baseline = %.2fpp' % f40_excess_vs_base)
-    if f40_excess_vs_base >= -10:
-        print('    PASS (>= -10pp, F6 does not significantly hurt)')
-    else:
-        print('    FAIL (< -10pp, F6 hurts on %s)' % SAMPLE_NAME)
-
-    # 9. Segment 5 check (core asset bull market)
-    seg5_base = base_stats[5]
-    seg5_f40 = f40_stats[5]
-    print('\n[3] Segment 5 (core asset bull market) check:')
-    print('    baseline excess = %.2fpp' % (seg5_base['excess'] * 100))
-    print('    40d+ excess     = %.2fpp' % (seg5_f40['excess'] * 100))
-    if seg5_f40['excess'] * 100 >= -10:
-        print('    PASS (>= -10pp, F6 fixes seg5 on %s)' % SAMPLE_NAME)
-    else:
-        print('    WARN (< -10pp, F6 does not fix seg5 on %s)' % SAMPLE_NAME)
-
-    # 10. CSV output
-    suffix = SAMPLE_NAME.lower()
-    df_out = pd.DataFrame(f40_stats)
-    df_out['version'] = 'f2f5f6_40d'
-    df_out['sample'] = SAMPLE_NAME
-    df_out.to_csv('%s/cross_sample_40d_%s.csv' % (OUT_DIR, suffix), index=False)
-    print('\nCSV saved to %s/cross_sample_40d_%s.csv' % (OUT_DIR, suffix))
-
-    nav_df = pd.DataFrame({
-        'baseline_%s' % suffix: base_nav,
-        'f2f5f6_40d_%s' % suffix: f40_nav,
-        'benchmark': benchmark_nav,
-    })
-    nav_df.to_csv('%s/daily_nav_cross_%s.csv' % (OUT_DIR, suffix))
-    print('Daily NAV saved to %s/daily_nav_cross_%s.csv' % (OUT_DIR, suffix))
+    # 6. Save summary CSV
+    summary_rows = []
+    for sample_name in [s[0] for s in CROSS_SAMPLES]:
+        if sample_name not in all_results:
+            continue
+        r = all_results[sample_name]
+        for seg_idx, seg_label in enumerate(seg_labels):
+            summary_rows.append({
+                'sample': sample_name,
+                'segment': seg_label,
+                'baseline_return': r['base_stats'][seg_idx]['strategy_return'],
+                'f40_return': r['f40_stats'][seg_idx]['strategy_return'],
+                'baseline_excess': r['base_stats'][seg_idx]['excess'],
+                'f40_excess': r['f40_stats'][seg_idx]['excess'],
+                'diff_excess_pp': (r['f40_stats'][seg_idx]['excess']
+                                   - r['base_stats'][seg_idx]['excess']) * 100,
+                'f40_sharpe': r['f40_stats'][seg_idx]['sharpe'],
+                'f40_max_drawdown': r['f40_stats'][seg_idx]['max_drawdown'],
+                'f40_alpha': r['f40_stats'][seg_idx]['alpha'],
+            })
+    pd.DataFrame(summary_rows).to_csv(
+        '%s/cross_sample_summary.csv' % OUT_DIR, index=False)
+    print('\nSummary CSV saved to %s/cross_sample_summary.csv' % OUT_DIR)
 
     print('\n' + '=' * 70)
     print('Cross-sample verification complete')

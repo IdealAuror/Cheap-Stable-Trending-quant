@@ -2,7 +2,7 @@
 
 > **用途**：跨会话/跨设备同步项目执行进度。每次会话开始先读本文件，结束前更新。
 > **最后更新**：2026-06-29
-> **当前阶段**：Phase 5 完成 ✅ — F6-MOM 动量因子改进成功，采用 40d 版本（61-21 momentum），策略环境最终回测：收益 732%，Sharpe 0.64，回撤 34.93%，Alpha 0.13，全样本所有验证目标达成。反向 F6 验证 disprove IC 分析暗示（IC 负但正向动量赢），IC 局限性教训落盘。跨样本验证脚本就绪，待聚宽环境运行 CSI300/CSI500。
+> **当前阶段**：🟢 **项目已关闭** — Phase 5 跨样本验证 PASS（AllA/CSI300/CSI500 三样本 OVERALL: PASS），F6-MOM 40d 动量因子有效性在全部样本确认。最终策略：F2(EP)+F5(LowVol)+F6(MOM-40d) 三因子等权 Z-score，策略环境年化 ~15.6%/Sharpe 0.64/回撤 34.93%，研究环境 Sharpe 0.82/回撤 43.56%。`docs/CURRENT-STRATEGY.md` 为最终策略总览，`docs/manual-investment-guide.md` 为普通人实盘指南。
 > **单一事实来源**：`docs/PROJECT-PLAN.md`（口径冲突以此为准）；本文件仅记录执行流程进度。
 > **详细决策与结论**：`research/decisions/P1-F1-EV-2026Q2-v1-decision.md`（已演变为 Phase 1 全因子决策总文档）+ `research/_index.md`（因子看板）。
 
@@ -23,7 +23,7 @@
 | **Phase 3 — 压测+仓位管理** | 🟡 **部分通过** | 3/4 通过：M1 Walk-Forward ✅（样本外 Sharpe 0.563）/ M2 断点 ✅ / M3 DSR ✅（0.9679）/ M4 目标波动率 ❌（年化降 13pp）。策略稳健性得到验证，目标波动率方法局限暴露 |
 | **Phase 4 — 实盘校准 V1** | ❌ **V1 失败** | 3/5 通过：M1 ✅（成本占比 1.36%）/ M2 ❌（31 只 >20% 持仓，流动性陷阱）/ M3 ✅ / M4 ✅ / M5 ❌（V2 回撤 36.85% > 30%）。策略对成本稳健但有小盘股流动性陷阱 + 仓位管理降回撤有限 |
 | **Phase 4 — 实盘校准 V2** | ❌ **V2 失败（项目收尾）** | 3/5 通过：M1 ✅（年化 15.61%，成本占比 1.41%）/ M2 ❌（23 只 >20% 持仓，V1=31→V2=23 改善但未达 <5）/ M3 ✅ / M4 ✅（信息收益 4.3x 成本）/ M5 ❌（V2 回撤 35.04%，V4 回撤 34.83% <35% 硬阈值但 >30% Gate 5 标准）。V2 修复方向有效但幅度不足，按 spec ≤3/5 停止迭代。策略 alpha 五重验证有效，可小资金（<2000万）+人工风控实盘（非 Gate 5 通过路径） |
-| **Phase 5 — F6-MOM 因子改进** | ✅ **完成** | 40d 版本（61-21 momentum）全样本所有目标达成。六版本对比（baseline/12-1/6-1/40d/consistency/40d-反向）确认正向 40d 全样本 Sharpe 最高（0.82 研究环境/0.64 策略环境）。反向 F6 验证 disprove IC 分析暗示（IC NW-t=-1.63 负但正向收益 694% vs 反向 274%），IC 局限性教训落盘（与 F5 教训一致：单因子 IC 无法衡量组合分散化价值）。A 股动量窗口比美股短（40 天有效，非 3-12 个月）。回撤约束多余（无风控版全面胜出）。跨样本验证脚本就绪（CSI300/CSI500），待聚宽环境运行。详见 `research/decisions/P5-F6-MOM-2026Q2-v1-decision.md` + `research/reports/P5-F6-MOM-2026Q2-v1-adjudication.md` |
+| **Phase 5 — F6-MOM 因子改进** | ✅ **完成（项目关闭）** | 40d 版本（61-21 momentum）全样本所有目标达成。六版本对比确认正向 40d 全样本 Sharpe 最高（0.82 研究/0.64 策略）。反向 F6 disprove IC 暗示。跨样本验证（AllA/CSI300/CSI500）2026-06-29 运行完成：三样本 OVERALL: PASS。CSV 保存至 `results/P5-F6-MOM-2026Q2-v1/`。A 股动量窗口 40 天有效。详见 `docs/CURRENT-STRATEGY.md`、`research/decisions/P5-F6-MOM-2026Q2-v1-decision.md`、`research/reports/P5-F6-MOM-2026Q2-v1-adjudication.md` |
 
 ---
 
@@ -191,7 +191,8 @@ F1-EV 与 F4-ROE 永久放弃，不纳入 Phase 2。
 | 2026-06-28 | Phase 4 V2 跑通 + 终判落盘（项目收尾） | 3/5 失败：M1 ✅ / M2 ❌（23 只 >20% 持仓，V1=31→V2=23 改善但未达 <5）/ M3 ✅ / M4 ✅ / M5 ❌（V2 回撤 35.04%，V4 回撤 34.83% <35% 硬阈值但 >30% Gate 5 标准）。新增 decision.md + adjudication.md。核心洞察：策略 alpha 五重验证有效 + 仓位管理方向有效（V4 回撤 <35%）+ M2 是结构性瓶颈 + M5 极端回撤是结构性局限。按 spec ≤3/5 停止迭代，项目收尾。实盘建议：小资金（<2000万）+ 人工风控（非 Gate 5 通过路径） |
 | 2026-06-29 | baseline 分段回测分析 + 启动 Phase 5 F6-MOM 因子改进研究 | 用户对 2016-2026 全样本回测结果（Sharpe -0.11）提出质疑，要求分段回测分析。完成 7 段分段回测（2014-2026 完整周期），定位策略 7 段中 6 段跑赢基准，唯一失效段是 2019-2020 核心资产牛市（Alpha -0.11，跑输 46pp）。整理分段回测报告 `research/reports/P4-PL-2026Q2-v2-segmented-backtest.md`。基于失效分析启动 Phase 5：选定 F6-MOM 动量因子（12-1 momentum，Carhart 1997）作为改进方向，避开 ROE 已验证失败路径。生成两个文件：① F6 IC 分析脚本 `research/scripts/P1-F6-MOM-2026Q2-v1-ic_analysis-standalone.py`（与 F2/F4/F5 同口径，市值中性化 NW-t≥2 门槛）；② 三因子合成策略 `joinquant/strategies/P4-PL-2026Q2-v2-AllA-F2F5F6-baseline.py`（F2+F5+F6 等权 z-score，baseline 风格无风控）。下一步：聚宽环境运行 IC 验证 + 三因子回测，重点验证段5 是否修复且其他段不破坏 |
 | 2026-06-29 | Phase 5 F6-MOM 因子改进完成 ✅ | 五版本对比研究（baseline/12-1/6-1/40d/consistency）确认 40d 版本（61-21 momentum，信号长度40天）全样本最优：研究环境 Sharpe 0.82（最高），段5超额-2.69pp（修复），段6超额+54.17pp（大幅改善）。策略环境最终回测：收益732%，Sharpe 0.64，回撤34.93%，Alpha 0.13。回撤约束三版本测试（严格15/70/10→Sharpe0.39；放宽20/85/15→Sharpe0.49；无风控→Sharpe0.64）证明无风控版全面胜出，回撤约束多余。同步更新普通人投资指南为三因子版（低估值低波动趋势策略）。最终策略文件：`joinquant/strategies/P4-PL-2026Q2-v2-AllA-F2F5F6-baseline.py`（DRAWDOWN_CONTROL_ENABLED=False）。关键教训：① A股动量有效窗口比美股短（40天有效，非3-12个月）；② 回撤约束在策略环境反而过度抑制收益，无风控版回撤34.93%已达标；③ 策略环境成本更高反而抑制极端波动，回撤低于研究环境 |
-| 2026-06-29 | Phase 5 反向F6验证 + IC局限性教训落盘 + 跨样本验证脚本 | 反向F6验证（f2f5_neg_f6_40d）disprove IC分析暗示：IC显示MOM_40d NW-t=-1.63负IC暗示反向更优，但回测正向40d收益694% vs 反向274%，段5超额正向-2.69pp vs 反向-27.01pp。IC局限性教训（与F5一致：单因子IC无法衡量组合分散化价值）落盘到决策文档。P5脚本增加跨样本验证模式（CROSS_SAMPLE_MODE），支持CSI300/CSI500验证F6大盘股有效性（规避F1壳价值污染教训）。新增决策文档+判定文档。待办：聚宽环境运行跨样本验证 |
+| 2026-06-29 | Phase 5 反向F6验证 + IC局限性教训落盘 + 跨样本验证脚本 | ... 简称见上 |
+| 2026-06-29 | Phase 5 跨样本验证完成 + 项目重构启动 | 聚宽环境运行 CROSS_SAMPLE_MODE：AllA/CSI300/CSI500 三样本 OVERALL: PASS。Phase 5 正式关闭。启动项目全面重构（`refactor/phase6` 分支）：目录重组、文档整理、代码规范化、依赖管理。新增 `docs/CURRENT-STRATEGY.md`。更新 `docs/manual-investment-guide.md` 数据对齐跨样本验证结果 |
 
 ---
 
